@@ -198,11 +198,15 @@ public struct ModelDownloadFeature {
 		let model = state.hexSettings.selectedModel
 		guard !model.isEmpty else { return }
 		let displayName = curatedDisplayName(for: model, curated: state.curatedModels)
+		let isDownloaded = state.selectedModelIsDownloaded
+		let inAvailable = state.availableModels[id: model] != nil
+		let availableIsDownloaded = state.availableModels[id: model]?.isDownloaded
+		HexLog.models.info("[updateBootstrapState] selected=\(model) inAvailableModels=\(inAvailable) availableIsDownloaded=\(String(describing: availableIsDownloaded)) -> isModelReady=\(isDownloaded)")
 		state.$modelBootstrapState.withLock { bootstrap in
 			bootstrap.modelIdentifier = model
 			bootstrap.modelDisplayName = displayName
-			bootstrap.isModelReady = state.selectedModelIsDownloaded
-			if state.selectedModelIsDownloaded {
+			bootstrap.isModelReady = isDownloaded
+			if isDownloaded {
 				bootstrap.lastError = nil
 				bootstrap.progress = 1
 			}
@@ -253,12 +257,35 @@ public struct ModelDownloadFeature {
 					}
 					await send(.modelsLoaded(recommended: recommended, available: infos))
 				} catch {
-					await send(.modelsLoaded(recommended: "", available: []))
+					// Network failed (e.g. WhisperKit HF API unreachable).
+					// Still check local disk for curated models so that
+					// already-downloaded models remain usable offline.
+					HexLog.models.warning("fetchAvailableModels failed, falling back to local disk check: \(error.localizedDescription)")
+					let curated = CuratedModelLoader.load()
+					let localInfos = await withTaskGroup(of: ModelInfo.self) { group in
+						for model in curated {
+							let name = model.internalName
+							group.addTask {
+								ModelInfo(
+									name: name,
+									isDownloaded: await transcription.isModelDownloaded(name)
+								)
+							}
+						}
+						var results: [ModelInfo] = []
+						for await info in group { results.append(info) }
+						return results
+					}
+					await send(.modelsLoaded(recommended: "", available: localInfos))
 				}
 			}
 
 		case let .modelsLoaded(recommended, available):
 			state.isLoadingModels = false
+			HexLog.models.info("[modelsLoaded] recommended=\(recommended) availableCount=\(available.count)")
+			for info in available {
+				HexLog.models.info("[modelsLoaded]   model=\(info.name) isDownloaded=\(info.isDownloaded)")
+			}
 			// Ensure our curated Parakeet options are visible even if WhisperKit doesn't list them
 			var availablePlus = available
 			for model in ParakeetModel.allCases.reversed() {
@@ -287,8 +314,10 @@ public struct ModelDownloadFeature {
 				let internalName = curated[idx].internalName
 				if let match = available.first(where: { ModelPatternMatcher.matches(internalName, $0.name) }) {
 					curated[idx].isDownloaded = match.isDownloaded
+					HexLog.models.info("[curatedMerge] \(internalName) matched available=\(match.name) isDownloaded=\(match.isDownloaded)")
 				} else {
 					curated[idx].isDownloaded = false
+					HexLog.models.warning("[curatedMerge] \(internalName) NO MATCH in available models (count=\(available.count))")
 				}
 			}
 			state.curatedModels = IdentifiedArrayOf(uniqueElements: curated)
@@ -347,10 +376,13 @@ public struct ModelDownloadFeature {
 			var failureMessage: String?
 			switch result {
 			case let .success(name):
+				let wasInAvailable = state.availableModels[id: name] != nil
 				state.availableModels[id: name]?.isDownloaded = true
-				if let idx = state.curatedModels.firstIndex(where: { $0.internalName == name }) {
+				let curatedIdx = state.curatedModels.firstIndex(where: { $0.internalName == name })
+				if let idx = curatedIdx {
 					state.curatedModels[idx].isDownloaded = true
 				}
+				HexLog.models.info("[downloadCompleted] SUCCESS name=\(name) wasInAvailableModels=\(wasInAvailable) curatedMatch=\(curatedIdx != nil)")
 				state.$hexSettings.withLock { settings in
 					settings.hasCompletedModelBootstrap = true
 				}
@@ -369,6 +401,7 @@ public struct ModelDownloadFeature {
 				}
 				state.downloadError = message
 				failureMessage = message
+				HexLog.models.error("[downloadCompleted] FAILURE: \(message) domain=\(ns.domain) code=\(ns.code)")
 			}
 			state.$modelBootstrapState.withLock { bootstrap in
 				if let failureMessage {

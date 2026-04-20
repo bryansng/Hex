@@ -177,7 +177,7 @@ actor TranscriptionClientLive {
 
     // First, check if the basic model directory exists
     guard fileManager.fileExists(atPath: modelFolderPath) else {
-      // Don't print logs that would spam the console
+      modelsLogger.debug("[isModelDownloaded] \(modelName): folder missing at \(modelFolderPath)")
       return false
     }
 
@@ -187,6 +187,7 @@ actor TranscriptionClientLive {
 
       // Model should have multiple files and certain key components
       guard !contents.isEmpty else {
+        modelsLogger.warning("[isModelDownloaded] \(modelName): folder exists but is empty")
         return false
       }
 
@@ -195,9 +196,12 @@ actor TranscriptionClientLive {
       let tokenizerFolderPath = tokenizerPath(for: modelName).path
       let hasTokenizer = fileManager.fileExists(atPath: tokenizerFolderPath)
 
+      let result = hasModelFiles && hasTokenizer
+      modelsLogger.info("[isModelDownloaded] \(modelName): hasModelFiles=\(hasModelFiles) hasTokenizer=\(hasTokenizer) tokenizerPath=\(tokenizerFolderPath) contents=[\(contents.joined(separator: ", "))] -> \(result)")
       // Both conditions must be true for a model to be considered downloaded
-      return hasModelFiles && hasTokenizer
+      return result
     } catch {
+      modelsLogger.error("[isModelDownloaded] \(modelName): contentsOfDirectory threw: \(error.localizedDescription)")
       return false
     }
   }

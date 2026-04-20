@@ -280,6 +280,9 @@ private extension TranscriptionFeature {
 private extension TranscriptionFeature {
   func handleStartRecording(_ state: inout State) -> Effect<Action> {
     guard state.modelBootstrapState.isModelReady else {
+      let modelId = state.modelBootstrapState.modelIdentifier ?? "nil"
+      let lastErr = state.modelBootstrapState.lastError ?? "nil"
+      transcriptionFeatureLogger.error("[handleStartRecording] BLOCKED: isModelReady=false model=\(modelId) lastError=\(lastErr)")
       return .merge(
         .send(.modelMissing),
         .run { _ in soundEffect.play(.cancel) }
